@@ -279,7 +279,12 @@ def map_sparse_id_to_embedding(
     embedding_field_to_add: str = "embedding",
     **kwargs,
 ) -> Dict[str, Any]:
-    # Map sparse id to pre-computed embedding
+    """Map an item ID to its embedding and, when configured, sample a positive.
+
+    ``positive_item_map[item_id]`` contains semantic-neighbor or high-co-occurrence
+    item IDs. PCRQ-VAE samples one candidate per visit; ordinary RQ training and
+    inference retain the previous behavior when no positive map is configured.
+    """
 
     embedding_map: torch.Tensor = dataset_config.embedding_map.get(
         sparse_id_field, None
@@ -291,6 +296,17 @@ def map_sparse_id_to_embedding(
         row[embedding_field_to_add] = embedding_map[row[sparse_id_field]].squeeze()
     else:
         raise ValueError(f"Embedding map not found")
+
+    positive_item_map = getattr(dataset_config, "positive_item_map", None)
+    if positive_item_map is not None:
+        item_id = torch.as_tensor(row[sparse_id_field], dtype=torch.long).reshape(-1)[0]
+        candidates = positive_item_map[item_id]
+        candidates = torch.as_tensor(candidates, dtype=torch.long).reshape(-1)
+        candidates = candidates[(candidates >= 0) & (candidates != item_id)]
+        if candidates.numel() == 0:
+            raise ValueError(f"No positive candidate found for item {item_id.item()}")
+        positive_id = candidates[torch.randint(candidates.numel(), size=())]
+        row["positive_embedding"] = embedding_map[positive_id].squeeze()
     return row
 
 

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Union, Dict
+from typing import Dict, List, Optional, Tuple, Union
 
 class FullBatchCrossEntropyLoss(nn.Module):
     """
@@ -125,3 +125,137 @@ class BetaQuantizationLoss(torch.nn.Module):
         xq_no_grad = xq.detach()
         loss = self.criterion(x_no_grad, xq) + self.beta * self.criterion(x, xq_no_grad)
         return loss
+
+class GlobalQuantizationLoss(torch.nn.Module):
+    def __init__(
+        self,
+        commitment_weight: float = 0.1,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        self.commitment_weight = commitment_weight
+        self.criterion = torch.nn.MSELoss(reduction=reduction)
+
+    def forward(
+        self,
+        encoded_embeddings: torch.Tensor,
+        quantized_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        codebook_loss = self.criterion(
+            quantized_embeddings,
+            encoded_embeddings.detach(),
+        )
+        commitment_loss = self.criterion(
+            encoded_embeddings,
+            quantized_embeddings.detach(),
+        )
+
+        return (
+            codebook_loss
+            + self.commitment_weight * commitment_loss
+        )
+
+class PrefixContrastiveLoss(torch.nn.Module):
+    """HiGR prefix-level InfoNCE loss for residual-quantization codewords.
+
+    For every layer except the final (leaf) layer, the codeword selected by an
+    anchor is contrasted with the codeword selected by its paired positive.
+    Other positives in the batch act as negatives. Excluding the final layer
+    lets it retain fine-grained item identity instead of forcing semantically
+    related items into the same complete semantic ID.
+
+    Expected input shape is ``(batch_size, num_layers, embedding_dim)``. Pair
+    ``anchor_codewords[i]`` with ``positive_codewords[i]`` before calling this
+    loss.
+    """
+
+    def __init__(
+        self,
+        temperature: float,
+        layer_weights: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than 0.")
+        if layer_weights is not None:
+            if any(weight < 0 for weight in layer_weights):
+                raise ValueError("layer_weights must be non-negative.")
+            if not any(weight > 0 for weight in layer_weights):
+                raise ValueError("At least one layer weight must be greater than 0.")
+
+        self.temperature = float(temperature)
+        self.layer_weights = (
+            tuple(float(weight) for weight in layer_weights)
+            if layer_weights is not None
+            else None
+        )
+
+    def forward(
+        self,
+        anchor_codewords: torch.Tensor,
+        positive_codewords: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute weighted InfoNCE over the first ``D - 1`` codebooks.
+
+        Args:
+            anchor_codewords: Selected anchor codewords with shape ``(B, D, H)``.
+            positive_codewords: Selected positive codewords with the same shape.
+
+        Returns:
+            A scalar equal to the weighted sum of per-layer InfoNCE losses,
+            divided by ``D - 1`` as specified by HiGR.
+        """
+        if anchor_codewords.ndim != 3 or positive_codewords.ndim != 3:
+            raise ValueError(
+                "anchor_codewords and positive_codewords must have shape "
+                "(batch_size, num_layers, embedding_dim)."
+            )
+        if anchor_codewords.shape != positive_codewords.shape:
+            raise ValueError(
+                "anchor_codewords and positive_codewords must have identical shapes; "
+                f"got {tuple(anchor_codewords.shape)} and "
+                f"{tuple(positive_codewords.shape)}."
+            )
+
+        batch_size, num_layers, _ = anchor_codewords.shape
+        if batch_size < 2:
+            raise ValueError(
+                "PrefixContrastiveLoss requires at least two pairs so that each "
+                "anchor has an in-batch negative."
+            )
+        if num_layers < 2:
+            raise ValueError(
+                "PrefixContrastiveLoss requires at least two quantization layers."
+            )
+
+        num_prefix_layers = num_layers - 1
+        if (
+            self.layer_weights is not None
+            and len(self.layer_weights) != num_prefix_layers
+        ):
+            raise ValueError(
+                "layer_weights must contain one weight for each prefix layer "
+                f"(D - 1 = {num_prefix_layers}); got {len(self.layer_weights)}."
+            )
+
+        labels = torch.arange(batch_size, device=anchor_codewords.device)
+        total_loss = anchor_codewords.new_zeros(())
+
+        for layer_idx in range(num_prefix_layers):
+            anchors = F.normalize(anchor_codewords[:, layer_idx, :], dim=-1)
+            positives = F.normalize(positive_codewords[:, layer_idx, :], dim=-1)
+
+            # logits[i, i] is the positive pair; all logits[i, j] where j != i
+            # are in-batch negatives for anchor i.
+            logits = anchors @ positives.transpose(0, 1)
+            logits = logits / self.temperature
+
+            layer_loss = F.cross_entropy(logits, labels)
+            layer_weight = (
+                self.layer_weights[layer_idx]
+                if self.layer_weights is not None
+                else 1.0
+            )
+            total_loss = total_loss + layer_weight * layer_loss
+
+        return total_loss / num_prefix_layers

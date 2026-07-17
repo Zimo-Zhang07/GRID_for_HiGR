@@ -1,0 +1,64 @@
+# @package _global_
+
+defaults:
+  - rqvae_train_flat
+  - _self_
+
+embedding_dim: 1024
+num_hierarchies: 3
+codebook_width: 1024
+positive_item_path: ???
+# HiGR does not report tau; require it explicitly instead of inventing a default.
+contrastive_temperature: ???
+
+tags:
+  - amazon-assign-ids-train
+  - pcrqvae
+
+data_loading:
+  dataset_config:
+    dataset:
+      positive_item_map:
+        _target_: torch.load
+        _args_:
+          - _target_: src.utils.file_utils.open_local_or_remote
+            file_path: ${positive_item_path}
+            mode: rb
+  datamodule:
+    train_dataloader_config:
+      collate_fn:
+        feature_to_input_name:
+          positive_embedding: positive_embedding
+    val_dataloader_config:
+      collate_fn:
+        feature_to_input_name:
+          positive_embedding: positive_embedding
+    test_dataloader_config:
+      collate_fn:
+        feature_to_input_name:
+          positive_embedding: positive_embedding
+
+model:
+  _target_: src.modules.clustering.prefix_contrastive_residual_quantization.PrefixContrastiveResidualQuantization
+  # Beauty has 12,101 items. Use nearly the complete item corpus to
+  # initialize each 1024-entry codebook.
+  init_buffer_size: 12000
+  global_quantization_loss_function:
+    _target_: src.components.loss_functions.GlobalQuantizationLoss
+    commitment_weight: 0.1
+    reduction: mean
+  prefix_contrastive_loss_function:
+    _target_: src.components.loss_functions.PrefixContrastiveLoss
+    temperature: ${contrastive_temperature}
+    layer_weights:
+      - 1.0
+      - 0.1
+  reconstruction_loss_weight: 1.0
+  global_quantization_loss_weight: 0.1
+  prefix_contrastive_loss_weight: 0.01
+
+callbacks:
+  model_checkpoint:
+    save_last: true
+    every_n_train_steps: 500
+    save_top_k: 1

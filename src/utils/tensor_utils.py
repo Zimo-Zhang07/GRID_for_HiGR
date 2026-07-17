@@ -1,3 +1,6 @@
+import json
+import os
+from collections import defaultdict
 from typing import Optional, Tuple, Union
 
 import torch
@@ -205,3 +208,79 @@ def transpose_tensor_from_file(
         # Save the result to a file
         torch.save(result, file_path)
         return None
+
+
+def write_sid_metrics(
+    file_path: str,
+    category_path: str,
+    num_hierarchies: int,
+    output_path: str,
+) -> None:
+    """Compute HiGR SID metrics and write them to one JSON file.
+
+    The inference pipeline appends a collision-resolution digit and transposes the
+    SID tensor before invoking this function. Only the original SID hierarchies are
+    evaluated. Concentration and consistency use the deepest constrained prefix,
+    namely the first ``D - 1`` codebooks.
+    """
+    if os.path.basename(file_path) != "merged_predictions_tensor.pt":
+        return
+    if num_hierarchies < 2:
+        raise ValueError("num_hierarchies must be at least 2.")
+
+    sids = torch.load(open_local_or_remote(file_path, mode="rb"), map_location="cpu")
+    categories = torch.load(
+        open_local_or_remote(category_path, mode="rb"), map_location="cpu"
+    )
+    categories = torch.as_tensor(categories).reshape(-1)
+
+    if sids.ndim != 2:
+        raise ValueError(f"SID tensor must be 2-D, got shape {tuple(sids.shape)}.")
+    if sids.shape[0] != categories.numel() and sids.shape[1] == categories.numel():
+        sids = sids.t()
+    if sids.shape[0] != categories.numel():
+        raise ValueError(
+            f"SID count {sids.shape[0]} does not match category count "
+            f"{categories.numel()}."
+        )
+    if sids.shape[1] < num_hierarchies:
+        raise ValueError(
+            f"SID width {sids.shape[1]} is smaller than num_hierarchies "
+            f"{num_hierarchies}."
+        )
+
+    # Discard the extra collision-resolution digit appended by GRID.
+    sids = sids[:, :num_hierarchies].long()
+    num_items = sids.shape[0]
+    num_unique_sids = torch.unique(sids, dim=0).shape[0]
+    collision = 1.0 - num_unique_sids / num_items
+
+    prefix_length = num_hierarchies - 1
+    groups = defaultdict(list)
+    for item_idx, prefix in enumerate(sids[:, :prefix_length].tolist()):
+        groups[tuple(prefix)].append(item_idx)
+
+    concentration_numerator = 0
+    same_category_pairs = 0
+    all_pairs = 0
+    for item_indices in groups.values():
+        group_categories = categories[item_indices]
+        _, counts = torch.unique(group_categories, return_counts=True)
+        concentration_numerator += counts.max().item()
+        same_category_pairs += (counts * (counts - 1) // 2).sum().item()
+        group_size = len(item_indices)
+        all_pairs += group_size * (group_size - 1) // 2
+
+    concentration = concentration_numerator / num_items
+    consistency = (
+        same_category_pairs / all_pairs if all_pairs > 0 else float("nan")
+    )
+    metrics = {
+        "collision": collision,
+        "concentration": concentration,
+        "consistency": consistency,
+    }
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        json.dump(metrics, output_file, ensure_ascii=False, indent=2)

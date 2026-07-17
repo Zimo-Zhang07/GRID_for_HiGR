@@ -1,6 +1,7 @@
 # @package _global_
 data_dir: ???
-embedding_model: google/flan-t5-xl
+# embedding_model: google/flan-t5-xl
+embedding_model: BAAI/bge-m3
 
 task_name: inference
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
@@ -19,12 +20,18 @@ model:
   semantic_embedding_model:
     _target_: src.components.network_blocks.hf_language_model.HFLanguageModel
     huggingface_model:
-      _target_: transformers.T5EncoderModel.from_pretrained
+      #_target_: transformers.T5EncoderModel.from_pretrained
+      _target_: transformers.AutoModel.from_pretrained
       pretrained_model_name_or_path: ${embedding_model}
     aggregator:
       _target_: src.models.components.network_blocks.embedding_aggregator.EmbeddingAggregator
       aggregation_strategy:
-        _target_: src.models.components.network_blocks.aggregation_strategy.MeanAggregation
+        # _target_: src.models.components.network_blocks.aggregation_strategy.MeanAggregation
+        _target_: src.models.components.network_blocks.aggregation_strategy.FirstAggregation
+    postprocessor:
+      _target_: src.models.components.network_blocks.normalize_layer.NormalizeLayer
+      dim: -1
+      p: 2
 callbacks:
   bq_writer: null
   pickle_writer:
@@ -56,6 +63,7 @@ trainer:
   devices: -1
   num_nodes: 1
   precision: 32
+  # precision: bf16-mixed
   log_every_n_steps: 2500
   val_check_interval: 5000
   deterministic: false

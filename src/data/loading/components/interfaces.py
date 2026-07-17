@@ -296,6 +296,8 @@ class ItemDatasetConfig(BaseDatasetConfig):
         The map from field name to the embedding tensor, where the embedding tensor
         is N x d where N is the number of unique IDs in the field and d is the embedding
         dimension.
+    positive_item_map: Optional[torch.Tensor]
+        Candidate positive item IDs for every item, shaped N x K. Used by PCRQ-VAE.
     num_placeholder_tokens_map: Optional[Dict[str, int]]
         The map of the sparse ID field to the number of placeholder IDs in the field.
     """
@@ -309,6 +311,7 @@ class ItemDatasetConfig(BaseDatasetConfig):
     feature_map: Optional[Dict[str, str]] = None
     field_type_map: Optional[Dict] = None
     embedding_map: Optional[Dict[str, torch.Tensor]] = None
+    positive_item_map: Optional[torch.Tensor] = None
     num_placeholder_tokens_map: Optional[Dict[str, int]] = None
 
 
